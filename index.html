@@ -165,7 +165,7 @@
       <div id="learnBody"></div>
     </section>
   </main>
-  <p class="foot">Переводы: MyMemory · примеры: Free Dictionary и Tatoeba · слова хранятся в этом браузере</p>
+  <p class="foot">Переводы: Google Translate (запасной — MyMemory) · примеры: Google, Free Dictionary, Tatoeba · слова хранятся в этом браузере</p>
 </div>
 
 <script>
@@ -315,7 +315,7 @@
       .trim().replace(/[.!?]+$/, '').toLowerCase().slice(0, 60);
   }
 
-  async function translate(text, from, to) {
+  async function translateMM(text, from, to) {
     var url = 'https://api.mymemory.translated.net/get?q=' + encodeURIComponent(text) + '&langpair=' + from + '|' + to;
     var r;
     try { r = await fetch(url); } catch (e) { throw fail('network'); }
@@ -342,33 +342,84 @@
     return { main: cands[0], alts: cands.slice(1, 4) };
   }
 
+  function stripTags(x) { return String(x || '').replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim(); }
+
+  async function googleRaw(text, from, to, withExamples) {
+    var url = 'https://translate.googleapis.com/translate_a/single?client=gtx&sl=' + from + '&tl=' + to +
+      '&dt=t&dt=bd' + (withExamples ? '&dt=ex' : '') + '&q=' + encodeURIComponent(text);
+    var r = await fetch(url);
+    if (!r.ok) throw new Error('http ' + r.status);
+    var j = await r.json();
+    if (!Array.isArray(j)) throw new Error('bad');
+    return j;
+  }
+
+  async function translateG(text, from, to) {
+    var j = await googleRaw(text, from, to, false);
+    var main = Array.isArray(j[0]) ? j[0].map(function (p) { return p && p[0] ? p[0] : ''; }).join('') : '';
+    var targetRe = to === 'ru' ? /[а-яё]/i : /[a-z]/i;
+    main = cleanTr(main);
+    if (!main || !targetRe.test(main) || norm(main) === norm(text)) throw fail('notfound');
+    var alts = [];
+    if (Array.isArray(j[1])) {
+      j[1].forEach(function (pos) {
+        (Array.isArray(pos[1]) ? pos[1] : []).forEach(function (w) {
+          var c = cleanTr(w);
+          if (c && c !== main && alts.indexOf(c) === -1 && targetRe.test(c) && c.split(' ').length <= 2) alts.push(c);
+        });
+      });
+    }
+    return { main: main, alts: alts.slice(0, 4) };
+  }
+
+  async function translate(text, from, to) {
+    try { return await translateG(text, from, to); }
+    catch (e) { return translateMM(text, from, to); } // запасной переводчик
+  }
+
+  function goodExample(x, w) {
+    var t = stripTags(x).replace(/^["“]|["”]$/g, '');
+    var words = t.split(' ');
+    if (words.length < 4 || words.length > 14 || t.length > 100) return '';
+    var re = new RegExp('(^|[^a-z])' + w.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + '[a-z]{0,3}([^a-z]|$)', 'i');
+    return re.test(t) ? t : '';
+  }
+
   async function getExample(en) {
-    var w = en.replace(/^(to|a|an|the)\s+/, '').trim();
+    var w = en.replace(/^(to|a|an|the)\s+/, '').trim().toLowerCase();
     if (!w) return '';
-    // 1) словарь с готовыми примерами
+    // 1) примеры из Google Translate
+    try {
+      var j = await googleRaw(w, 'en', 'ru', true);
+      var block = j[13] && j[13][0];
+      var found = (Array.isArray(block) ? block : []).map(function (e) { return goodExample(e && e[0], w); })
+        .filter(Boolean).sort(function (a, b) { return a.length - b.length; });
+      if (found.length) return found[0];
+    } catch (e) {}
+    // 2) Free Dictionary
     if (/^[a-z-]+$/.test(w)) {
       try {
         var r = await fetch('https://api.dictionaryapi.dev/api/v2/entries/en/' + encodeURIComponent(w));
         if (r.ok) {
           var d = await r.json();
-          var found = [];
-          (Array.isArray(d) ? d : []).forEach(function (en1) {
-            (en1.meanings || []).forEach(function (m) {
-              (m.definitions || []).forEach(function (df) { if (df.example) found.push(String(df.example)); });
+          var f2 = [];
+          (Array.isArray(d) ? d : []).forEach(function (e1) {
+            (e1.meanings || []).forEach(function (m) {
+              (m.definitions || []).forEach(function (df) { var g = goodExample(df.example, w); if (g) f2.push(g); });
             });
           });
-          found = found.filter(function (x) { return x.length <= 110; }).sort(function (a, b) { return a.length - b.length; });
-          if (found.length) return found[0].replace(/^["“]|["”]$/g, '');
+          f2.sort(function (a, b) { return a.length - b.length; });
+          if (f2.length) return f2[0];
         }
       } catch (e) {}
     }
-    // 2) запасной вариант — короткие предложения из Tatoeba
+    // 3) Tatoeba
     try {
       var r2 = await fetch('https://tatoeba.org/en/api_v0/search?from=eng&query=' + encodeURIComponent('=' + w) + '&orphans=no&unapproved=no&sort=relevance');
       if (r2.ok) {
         var d2 = await r2.json();
-        var texts = (d2.results || []).map(function (x) { return String(x.text || ''); })
-          .filter(function (x) { return x.length >= 12 && x.length <= 80 && x.toLowerCase().indexOf(w.toLowerCase()) !== -1; });
+        var texts = (d2.results || []).map(function (x) { return goodExample(x.text, w); }).filter(Boolean)
+          .sort(function (a, b) { return a.length - b.length; });
         if (texts.length) return texts[0];
       }
     } catch (e) {}
